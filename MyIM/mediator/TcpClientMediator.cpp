@@ -3,6 +3,7 @@
 TcpClientMediator::TcpClientMediator()
 {
 	m_pNet = new TcpClient(this);
+	//OpenNet();
 }
 
 TcpClientMediator::~TcpClientMediator()

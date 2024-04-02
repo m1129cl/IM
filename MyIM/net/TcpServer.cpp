@@ -2,17 +2,20 @@
 #include"TcpServerMediator.h"
 #include<process.h>
 
-TcpServer::TcpServer(INetMediator* mediator):m_sock(INVALID_SOCKET)
+TcpServer::TcpServer(INetMediator* mediator):m_sock(INVALID_SOCKET), m_isStop(false)
 {
 	m_pMediator = mediator;//new TcpServerMediator;
+
 }
 
 TcpServer::~TcpServer()
 {
+    UnInitNet();
 }
 //打开网络：加载库 创建套接字 绑定ip 监听
 bool TcpServer::InitNet()
 {
+    cout <<"tcpSever:"<< __func__ << endl;
     //1.加载库
     WORD wVersionRequested;
     WSADATA wsaData;
@@ -93,7 +96,7 @@ bool TcpServer::InitNet()
     HANDLE handle =(HANDLE) _beginthreadex(0, 0, &AcceptThread, this, 0, NULL);//标志位0：创建及运行；thradId
     if (handle)
         m_handleList.push_back(handle);
-    return false;
+    return true;
 }
 //接受链接线程函数
 unsigned __stdcall TcpServer::AcceptThread(void* lpVoid)
@@ -102,7 +105,7 @@ unsigned __stdcall TcpServer::AcceptThread(void* lpVoid)
     sockaddr_in addrClient;
     int addrLen = sizeof(addrClient);
     unsigned int threadId = 0;
-    while (1)
+    while (!pThis->m_isStop)
     {
         //接受链接
         ///静态成员函数不能访问 非静态成员，静态函数内部要有对象或指针去调用
@@ -122,25 +125,133 @@ unsigned __stdcall TcpServer::AcceptThread(void* lpVoid)
 //关闭网络
 void TcpServer::UnInitNet()
 {
+    //关闭套接字,非空且是合法的
+    if (m_sock&&m_sock!=INVALID_SOCKET)closesocket(m_sock);
+    for (map<unsigned int, SOCKET>::iterator ite = m_threadIdToSocket.begin(); ite != m_threadIdToSocket.end(); )
+    {
+        if(ite->second&&ite->second!=INVALID_SOCKET)
+            closesocket(ite->second);
+        //socket关闭了，是无效的了，所以从map移除
+        ite = m_threadIdToSocket.erase(ite);
+    }
+    //这样接收和连接线程干完把本轮任务就结束了
+    m_isStop = true;
+    //关闭线程 及线程句柄 
+    for (list<HANDLE>::iterator ite=m_handleList.begin();ite!=m_handleList.end();)
+    {
+        //等一会，让线程函数执行到while(!m_isStop)结束死循环 自动退出
+        if ((*ite))
+        {
+            //等100毫秒还没结束就杀死
+            if(WaitForSingleObject((*ite),100)==WAIT_TIMEOUT)
+                TerminateThread((*ite), 0);
+            delete (*ite);
+            (*ite) = NULL;
+        }
+        //回收list无效节点
+        ite = m_handleList.erase(ite);
+    }
+    
+    //卸载库
+    WSACleanup();
 }
-//发数据
+//发数据:long类型 可以兼容ip地址和socket
 bool TcpServer::SendData(long ip, char* buf, int len)
 {
     //判断合法性
-    //宪法包大小
+    if (buf == NULL ||len<=0)
+    {
+        cout <<__func__<< " TcpServer发送失败：数据包是空的 或者 len<=0\n" << endl;
+        return false;
+    }
+    //先发包大小
+    if (send(ip, (char*)&len, sizeof(len), 0) <= 0)
+    {
+        cout << __func__ << "send error:" <<WSAGetLastError()<< endl;
+        return false;
+    }
+    //cout << "Server send success!" << endl;
     //再发包内容
-    send(ip, buf, len, 0);
-	return false;
+    if(send(ip, buf, len, 0)<=0)
+    {
+        cout << __func__ << "send error:" << WSAGetLastError() << endl;
+        return false;
+    }
+    //cout << "Server send success!" << endl;
+	return true;
 }
 //收数据
 void TcpServer::RecvData()
 {
+    //连接成功后 创建线程（这个线程创建既运行）可能id 和socket还没放到map中呢 导致娶不到socket
+    //1、休眠一会
+    Sleep(100);
+    //2、获取当前线程的 socket
     SOCKET sock = m_threadIdToSocket[GetCurrentThreadId()];
-    //接受数据也是阻塞的 多个客户端socket都要同时阻塞的去收，所以每一个客户端都要有一个线程去接收数据
-    while (1)
+    if (!sock || sock == INVALID_SOCKET)
     {
-        //recv(sock,)
+        cout << __func__ << "socket error" << endl;
+        return;
     }
+    int recvLen = 0;
+    int bufLen = 0;//用于接收包的大小
+    sockaddr_in addr;
+    int addrLen = sizeof(addr);
+    char* buf = NULL;
+    //接受数据也是阻塞的 多个客户端socket都要同时阻塞的去收，所以每一个客户端都要有一个线程去接收数据
+    //先收包大小
+    while (!m_isStop)
+    {
+        recvLen = recv(sock, (char*)&bufLen, sizeof(bufLen), 0);
+        if (recvLen == 0)
+        {
+            //接受数据失败
+            cout << __func__ << "recv error:" << WSAGetLastError() << endl;
+            return;
+            //返回值为0 表示连接已断开
+            //关闭线程 句柄 socket
+            //closesocket(sock);
+            /*for (HANDLE handle : m_handleList)
+            {
+                if()
+            }
+            CloseHandle()*/
+            //return;
+        }
+        else//接收到的包大小大于0
+        {
+            //知道应该收包的大小，所以就new这么大的空间
+            /////mtu1460，客户端一次发的可能包比较大比如2000 所以会分包，所以接收就需要循环接受（这样才能接收完整）
+            buf = new char[bufLen];
+            memset(buf, 0, bufLen);
+            int offset = 0;//存储累计接收到的数据
+
+            //if(recv(sock, (char*)&buf, bufLen, 0)>0)
+            while (bufLen > 0)
+            {
+                recvLen = recv(sock, (char*)buf + offset, bufLen, 0);
+                if (recvLen > 0)
+                {
+                    //接收的buf向后偏移 、buf剩余空间的大小
+                    offset += recvLen;//累计接收数据量
+                    bufLen -= recvLen;//还需要接收的数据量
+                }
+                else
+                {
+                    //接受数据失败
+                    cout << __func__ << "recv error:" << WSAGetLastError() << endl;
+                    return;
+                }
+            }
+            //收完数据 传给中介者 todo处理完需要把buf堆区空间回收
+            m_pMediator->DealData(sock, buf, offset);
+        }
+    }
+    //再根据包大小 接受真正的数据包
+    //while (1)
+    //{
+    //    //recv(sock,)
+    //}
 
 }
 //接收数据线程函数 

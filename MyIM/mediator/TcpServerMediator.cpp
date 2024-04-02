@@ -3,6 +3,7 @@
 TcpServerMediator::TcpServerMediator()
 {
 	m_pNet = new TcpServer(this);
+	//OpenNet();
 }
 
 TcpServerMediator::~TcpServerMediator()
@@ -36,6 +37,11 @@ bool TcpServerMediator::SendData(long ip, char* buf, int len)
 
 void TcpServerMediator::DealData(long ip, char* buf, int len)
 {
-	//todo 打印接收到的数据
+	//打印接收到的数据  测试代码
 	cout << __func__ << ":" << buf << endl;
+	//发回客户端
+	char str[50] = "TcpServerMediator::DealData";
+	SendData(ip,str, sizeof(str));
+	
+
 }
